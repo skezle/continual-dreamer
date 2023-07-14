@@ -3,7 +3,11 @@
 This repository contains code to reproduce the experiments in our 2023 Collas paper: [On The Effectiveness of World Models For Continual Reinforcement Learning(https://arxiv.org/abs/2211.15944)]. We show that world-models - in particular [DreamerV2](https://github.com/danijar/dreamerv2) - are effective at retaining skills during continual reinforcement learning
 
 ```
-@article{
+@article{kessler2022surprising,
+  title={The surprising effectiveness of latent world models for continual reinforcement learning},
+  author={Kessler, Samuel and Mi{\l}o{\'s}, Piotr and Parker-Holder, Jack and Roberts, Stephen J},
+  journal={arXiv preprint arXiv:2211.15944},
+  year={2022}
 }
 ```
 
