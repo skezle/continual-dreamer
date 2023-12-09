@@ -37,7 +37,6 @@ defaults = common.Config(configs.pop('defaults'))
 
 
 def train(env, config, outputs=None):
-
     # set seeds
     tf.random.set_seed(config.seed)
     np.random.seed(config.seed)
@@ -52,25 +51,25 @@ def train(env, config, outputs=None):
     outputs = outputs or [
         common.TerminalOutput(),
         common.JSONLOutput(config.logdir),
-        common.TensorBoardOutput(logdir=config.logdir,skipped_metrics=config.skipped_metrics),
+        common.TensorBoardOutput(logdir=config.logdir, skipped_metrics=config.skipped_metrics),
     ]
     replay = common.Replay(logdir / 'train_episodes', **config.replay)
     step = common.Counter(replay.stats['total_steps'])
     logger = common.Logger(step, outputs, multiplier=config.action_repeat)
     metrics = collections.defaultdict(list)
-    replay.logger = logger 
+    replay.logger = logger
 
     should_train = common.Every(config.train_every)
     should_log = common.Every(config.log_every)
     should_video = common.Every(config.log_every_video)
-    should_expl = common.Until(config.expl_until) # config.expl_until == 0 then we are always exploring
-
+    should_expl = common.Until(config.expl_until)  # config.expl_until == 0 then we are always exploring
     def per_episode(ep):
         length = len(ep['reward']) - 1
         score = float(ep['reward'].astype(np.float64).sum())
         print(f'Episode has {length} steps and return {score:.1f}.')
         logger.scalar('return', score)
         logger.scalar('length', length)
+        logger.scalar('task', env.index)
         for key, value in ep.items():
             if re.match(config.log_keys_sum, key):
                 logger.scalar(f'sum_{key}', ep[key].sum())
@@ -108,26 +107,36 @@ def train(env, config, outputs=None):
     print('Create agent.')
     agnt = agent.Agent(config, env.obs_space, env.act_space, step)
 
-    if isinstance(agnt._expl_behavior, Plan2Explore):
+    if isinstance(agnt._expl_behavior, Plan2Explore): #tego nie używamy
         replay.agent = agnt
 
-    dataset = iter(replay.dataset(**config.dataset))
+    dataset = iter(replay.dataset(**config.dataset, oversampling=False))
+    dataset_over = iter(replay.dataset(**config.dataset, oversampling=True))
+
     train_agent = common.CarryOverState(agnt.train)
-    train_agent(next(dataset))
+    data_wm = next(dataset)
+    data_pol = next(dataset_over)
+
+    train_agent(data_wm, data_pol)
+
     if (logdir / 'variables.pkl').exists():
         print("Loading agent.")
         agnt.load(logdir / 'variables.pkl')
     else:
         print('Pretrain agent.')
         for _ in range(config.pretrain):
-            train_agent(next(dataset))
+            data_wm = next(dataset)
+            data_pol = next(dataset_over)
+            train_agent(data_wm, data_pol)
     policy = lambda *args: agnt.policy(
         *args, mode='explore' if should_expl(step) else 'train')
 
     def train_step(tran, worker):
         if should_train(step):
             for _ in range(config.train_steps):
-                mets = train_agent(next(dataset))
+                data_wm = next(dataset)
+                data_pol = next(dataset_over)
+                mets = train_agent(data_wm, data_pol)
                 [metrics[key].append(value) for key, value in mets.items()]
         if should_log(step):
             for name, values in metrics.items():
@@ -138,14 +147,17 @@ def train(env, config, outputs=None):
             logger.write(fps=True)
 
     def eval_per_episode(ep):
+        task_idx = env.index
         length = len(ep['reward']) - 1
         score = float(ep['reward'].astype(np.float64).sum())
         # print(f'Episode has {length} steps and return {score:.1f}.')
         logger.scalar('eval_return', score)
         logger.scalar('eval_length', length)
+        logger.scalar('eval_return_{}'.format(task_idx), score)
+        logger.scalar('eval_length_{}'.format(task_idx), length)
         if should_video(step):
             for key in config.log_keys_video:
-                logger.video(f'eval_{step.value}', ep[key])
+                logger.video(f'eval_{task_idx}_{step.value}', ep[key])
         logger.write()
 
     driver.on_step(train_step)
@@ -166,7 +178,6 @@ def train(env, config, outputs=None):
 
 
 def cl_train_loop(envs, config, outputs=None, eval_envs=None):
-
     # set seeds
     tf.random.set_seed(config.seed)
     np.random.seed(config.seed)
@@ -195,7 +206,7 @@ def cl_train_loop(envs, config, outputs=None, eval_envs=None):
     logger = common.Logger(total_step, outputs, multiplier=config.action_repeat)
     metrics = collections.defaultdict(list)
     replay.logger = logger
-    
+
     # from replay buffer we can warm start the CL loop and work out the task we are currently in and the step
     if unbalanced_steps is not None:
         tot_steps_after_task = np.cumsum(unbalanced_steps)
@@ -203,7 +214,7 @@ def cl_train_loop(envs, config, outputs=None, eval_envs=None):
         print("Task {}".format(task_id))
         rep = int(replay.stats['total_steps'] // (np.sum(unbalanced_steps)))
         print("Rep {}".format(rep))
-        restart_step = (unbalanced_steps-tot_steps_after_task+replay.stats['total_steps'])[task_id]
+        restart_step = (unbalanced_steps - tot_steps_after_task + replay.stats['total_steps'])[task_id]
     else:
         task_id = int(replay.stats['total_steps'] // config.steps)
         print("Task {}".format(task_id))
@@ -281,7 +292,7 @@ def cl_train_loop(envs, config, outputs=None, eval_envs=None):
                 restart = False
             else:
                 start_step = 0
-            
+
             replay.set_task(task_id)
 
             replay.set_task(task_id)
