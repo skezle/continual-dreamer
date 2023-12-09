@@ -37,7 +37,7 @@ class Driver:
                 self._obs[i] = ob() if callable(ob) else ob
                 act = {k: np.zeros(v.shape) for k, v in self._act_spaces[i].items()}
                 tran = {k: self._convert(v) for k, v in {**ob, **act}.items()}
-                [fn(tran, worker=i, **self._kwargs) for fn in self._on_resets]
+                [fn(tran, worker=i, task_index=self._envs[0].index) for fn in self._on_resets]
                 self._eps[i] = [tran]
             obs = {k: np.stack([o[k] for o in self._obs]) for k in self._obs[0]}
             actions, self._state = policy(obs, self._state, **self._kwargs)
@@ -65,7 +65,11 @@ class Driver:
             obs = [ob() if callable(ob) else ob for ob in obs]
             for i, (act, ob) in enumerate(zip(actions, obs)):
                 tran = {k: self._convert(v) for k, v in {**ob, **act}.items()}
-                [fn(tran, worker=i, **self._kwargs) for fn in self._on_steps]
+                for j in range(len(self._on_steps)):
+                    if j == 1:
+                        self._on_steps[j](tran, worker=i, task_index=self._envs[0].index)
+                    else:
+                        self._on_steps[j](tran, worker=i, **self._kwargs)
                 self._eps[i].append(tran)
                 step += 1
                 if ob['is_last']:

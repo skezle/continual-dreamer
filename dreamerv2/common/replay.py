@@ -15,45 +15,49 @@ import wandb
 
 import time
 
+
 def coverage_maximization_distance(tensor1: np.ndarray, tensor2: np.ndarray, distance_type: str):
     if distance_type == "euclid":
         return np.linalg.norm(tensor1 - tensor2)
     elif distance_type == "cosine":
-        assert tensor1.ndim == 1 and  tensor2.ndim == 1, "wrong shape in Coverage Maximization distance"
-        return (tensor1 @ tensor2.T)/(np.linalg.norm(tensor1)*np.linalg.norm(tensor2))
+        assert tensor1.ndim == 1 and tensor2.ndim == 1, "wrong shape in Coverage Maximization distance"
+        return (tensor1 @ tensor2.T) / (np.linalg.norm(tensor1) * np.linalg.norm(tensor2))
     else:
         print("Wrong distance type")
 
+
 class Replay:
     def __init__(
-        self,
-        directory,
-        capacity=0,
-        ongoing=False,
-        minlen=1,
-        maxlen=0,
-        prioritize_ends=False,
-        reservoir_sampling=False,
-        reward_sampling=False,
-        num_tasks=1,
-        recent_past_sampl_thres=0,
-        uncertainty_sampling=False,
-        uncertainty_recalculation:int=5000,
-        coverage_sampling=False,
-        coverage_sampling_args=None
+            self,
+            directory,
+            capacity=0,
+            ongoing=False,
+            minlen=1,
+            maxlen=0,
+            prioritize_ends=False,
+            reservoir_sampling=False,
+            reward_sampling=False,
+            num_tasks=1,
+            recent_past_sampl_thres=0,
+            uncertainty_sampling=False,
+            uncertainty_recalculation: int = 5000,
+            coverage_sampling=False,
+            coverage_sampling_args=None,
+            oversampling=False
     ):
         self._directory = pathlib.Path(directory).expanduser()
         self._directory.mkdir(parents=True, exist_ok=True)
-        self._capacity = capacity # replay buffer size
+        # replay buffer size
+        self._capacity = capacity
         self._ongoing = ongoing
         self._minlen = minlen  # this is used as a cutoff before storing in the replay buffer
         self._maxlen = maxlen  # only used to sample seq_lens
         self._prioritize_ends = prioritize_ends  # prioritizes the end of an epsiode which is loaded
         self._reservoir_sampling = reservoir_sampling  # whether to use reservoir sampling or not
-        self.recent_past_sampl_thres = recent_past_sampl_thres  # probability above this threshold trigger uniform episode. Below trigger triangle distribution
-        self._reward_sampling = reward_sampling  # whether to use rewrad sampling or not
-        self._coverage_sampling = coverage_sampling # whether to use coverage maximization
-        self._coverage_sampling_args = coverage_sampling_args # coverage maximization args
+        self.recent_past_sampl_thres = recent_past_sampl_thres  # pobabilities above this threshold trigger uniform episode. Below trigger triangle distribution
+        self._reward_sampling = reward_sampling  # whether to use reservoir sampling or not
+        self._coverage_sampling = coverage_sampling  # whether to use coverage maximization
+        self._coverage_sampling_args = coverage_sampling_args  # coverage maximization args
         self._num_tasks = num_tasks  # the number of tasks in the cl loop
         self._random = np.random.RandomState()
         # total_steps / eps is the total number of steps / eps seen over the course of training
@@ -74,44 +78,48 @@ class Replay:
 
         self._plan2explore = None
         self._uncertainty_sampling = uncertainty_sampling
-        self._uncertainty_recalculation =  uncertainty_recalculation
+        self._uncertainty_recalculation = uncertainty_recalculation
         self._episodes_uncertainties = collections.defaultdict()
-       
+
         self.set_task()
         if self._coverage_sampling:
             self.coverage_maximization_initialization(directory)
-                
+        self._oversampling = oversampling
+
     def set_task(self, task_idx=0):
         self.task_idx = task_idx
 
     def get_task(self):
         return self.task_idx
-    
+
     def get_max_task(self):
         if len(self._tasks) > 0:
             return np.max([v for k, v in self._tasks.items()])
         else:
             return 0
-        
+
     def coverage_maximization_initialization(self, directory):
         self._replay_cell = tf.keras.layers.ConvLSTM2D(
             filters=self._coverage_sampling_args["filters"], kernel_size=self._coverage_sampling_args["kernel_size"],
             padding="same", return_sequences=False, return_state=True, activation="elu")
-               
+
         self._episodes_heap = []
         self._lstm_states = {}
         if bool(self._complete_eps):
             for filename, episode in self._complete_eps.items():
                 if self._coverage_sampling_args["normalize_lstm_state"]:
-                    self._lstm_states[str(filename)] = self._replay_cell(tf.expand_dims(np.array(episode['image'])/255,axis=0))[2].numpy().reshape(-1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
+                    self._lstm_states[str(filename)] = \
+                    self._replay_cell(tf.expand_dims(np.array(episode['image']) / 255, axis=0))[2].numpy().reshape(
+                        -1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
                     self._lstm_states[str(filename)] /= np.linalg.norm(self._lstm_states[str(filename)])
                 else:
-                    self._lstm_states[str(filename)] = self._replay_cell(tf.expand_dims(np.array(episode['image'])/255,axis=0))[2].numpy().reshape(-1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
-            
-            with open(directory/f'coverage_max_heap.pkl', 'rb') as handle:
+                    self._lstm_states[str(filename)] = \
+                    self._replay_cell(tf.expand_dims(np.array(episode['image']) / 255, axis=0))[2].numpy().reshape(
+                        -1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
+
+            with open(directory / f'coverage_max_heap.pkl', 'rb') as handle:
                 self._episodes_heap = pickle.load(handle)
 
-                
     @property
     def stats(self):
         ret = {
@@ -122,15 +130,16 @@ class Replay:
             'av_task': np.mean([v for k, v in self._tasks.items()]),
             'er_task': [len([v for k, v in self._tasks.items() if v == i]) for i in range(self._num_tasks)],
         }
-        # max_task = self.get_max_task()
-        # for i in range(max_task + 1):
-        #     ret['er_task_{0}'.format(i)] = len([v for k, v in self._tasks.items() if v == i])
+        max_task = self.get_max_task()
+        for i in range(max_task + 1):
+            ret['er_task_{0}'.format(i)] = len([v for k, v in self._tasks.items() if v == i])
         return ret
-    
-    def add_step(self, transition, worker=0):
+
+    def add_step(self, transition, worker=0, task_index=0):
         episode = self._ongoing_eps[worker]
         for key, value in transition.items():
             episode[key].append(value)
+        episode["task_index"] = task_index
         if transition['is_last']:
             self.add_episode(episode)
             episode.clear()
@@ -157,35 +166,50 @@ class Replay:
 
         if self._coverage_sampling:
             if self._coverage_sampling_args["normalize_lstm_state"]:
-                self._lstm_states[str(filename)] = self._replay_cell(tf.expand_dims(np.array(episode['image'])/255,axis=0))[2].numpy().reshape(-1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
+                self._lstm_states[str(filename)] = \
+                self._replay_cell(tf.expand_dims(np.array(episode['image']) / 255, axis=0))[2].numpy().reshape(
+                    -1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
                 self._lstm_states[str(filename)] /= np.linalg.norm(self._lstm_states[str(filename)])
             else:
-                self._lstm_states[str(filename)] = self._replay_cell(tf.expand_dims(np.array(episode['image'])/255,axis=0))[2].numpy().reshape(-1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
+                self._lstm_states[str(filename)] = \
+                self._replay_cell(tf.expand_dims(np.array(episode['image']) / 255, axis=0))[2].numpy().reshape(
+                    -1)  # LSTM has return_state=True, so it returns three outputs, and last one is a cell state
 
-            if len(self._episodes_heap) == 0 and self._total_episodes != 0:            
+            if len(self._episodes_heap) == 0 and self._total_episodes != 0:
                 # In this line, we initialize the priority queue with some arbitrary priority value
-                heapq.heappush(self._episodes_heap, (1, str(filename))) # A 'heapq' is a priority queue -- a special type of queue in which each element is associated with a priority value.
+                heapq.heappush(self._episodes_heap, (1,
+                                                     str(filename)))  # A 'heapq' is a priority queue -- a special type of queue in which each element is associated with a priority value.
                 self._complete_eps[str(filename)] = episode
             else:
                 if self._loaded_steps < self._capacity:
                     start = time.time()
-                    distances = [coverage_maximization_distance(self._lstm_states[str(filename)], self._lstm_states[str(replay_files)], self._coverage_sampling_args['distance'])
-                                    for replay_files in np.random.choice(list(self._lstm_states.keys()), np.min((len(list(self._lstm_states.keys())),
-                                        self._coverage_sampling_args["number_of_comparisons"])), replace=False)]
+                    distances = [coverage_maximization_distance(self._lstm_states[str(filename)],
+                                                                self._lstm_states[str(replay_files)],
+                                                                self._coverage_sampling_args['distance'])
+                                 for replay_files in np.random.choice(list(self._lstm_states.keys()),
+                                                                      np.min((len(list(self._lstm_states.keys())),
+                                                                              self._coverage_sampling_args[
+                                                                                  "number_of_comparisons"])),
+                                                                      replace=False)]
                     distance_metric = np.median(distances)
                     end = time.time() - start
                     heapq.heappush(self._episodes_heap, (distance_metric, str(filename)))
                     self._complete_eps[str(filename)] = episode
                 elif self._loaded_steps >= self._capacity:
                     start = time.time()
-                    distances = [coverage_maximization_distance(self._lstm_states[str(filename)], self._lstm_states[str(replay_files)], self._coverage_sampling_args['distance'])
-                                for replay_files in np.random.choice(list(self._lstm_states.keys()),np.min((len(list(self._lstm_states.keys())),
-                                        self._coverage_sampling_args["number_of_comparisons"])), replace=False)]
+                    distances = [coverage_maximization_distance(self._lstm_states[str(filename)],
+                                                                self._lstm_states[str(replay_files)],
+                                                                self._coverage_sampling_args['distance'])
+                                 for replay_files in np.random.choice(list(self._lstm_states.keys()),
+                                                                      np.min((len(list(self._lstm_states.keys())),
+                                                                              self._coverage_sampling_args[
+                                                                                  "number_of_comparisons"])),
+                                                                      replace=False)]
                     distance_metric = np.median(distances)
                     end = time.time() - start
 
                     # In the line below, we add a new episode with the corresponding distance metric to the heapq, and next, remove the episode with the smallest distance.
-                    priority, filename_remove = heapq.heappushpop(self._episodes_heap,(distance_metric, str(filename)))
+                    priority, filename_remove = heapq.heappushpop(self._episodes_heap, (distance_metric, str(filename)))
                     episode_remove = self._complete_eps[str(filename_remove)]
                     self._loaded_steps -= eplen(episode_remove)
                     self._loaded_episodes -= 1
@@ -202,7 +226,7 @@ class Replay:
                 self._logger.scalar("replay_cm/distances_median", np.median(distances))
                 self._logger.scalar("replay_cm/distances_percentile75", np.percentile(distances, 75))
                 self._logger.scalar("replay_cm/distances_percentile25", np.percentile(distances, 25))
-                with open(self._directory/f'coverage_max_heap.pkl', 'wb') as handle:
+                with open(self._directory / f'coverage_max_heap.pkl', 'wb') as handle:
                     pickle.dump(self._episodes_heap, handle, protocol=pickle.HIGHEST_PROTOCOL)
         elif self._reservoir_sampling:
             # Alg 2 from https://arxiv.org/pdf/1902.10486.pdf
@@ -211,7 +235,7 @@ class Replay:
             else:
                 # self._total_episodes: the total number of episodes seen so far
                 i = np.random.randint(self._total_episodes)
-                # this condition is should be if i < mem_sz, mem_sz is in number of 
+                # this condition is should be if i < mem_sz, mem_sz is in number of
                 # transitions, but experience is stored in terms of episodes
                 # self._loaded_episodes is a surrogate
 
@@ -221,8 +245,7 @@ class Replay:
                 if i < self._loaded_episodes:
                     # remove item i from the replay buffer
                     # it can be re-loaded if the run starts again
-                    # so need store an additional dictionary to store on disk to keep track of
-                    # of the reservoir.
+                    # so need to delete it from disk
                     filenames = [k for k, v in self._complete_eps.items()]
                     filename_remove = filenames[i]
                     episode_remove = self._complete_eps[str(filename_remove)]
@@ -233,22 +256,23 @@ class Replay:
                     del self._reward_eps[str(filename_remove)]
                     if str(filename_remove) in self._episodes_uncertainties:
                         del self._episodes_uncertainties[str(filename_remove)]
-            with open(self._directory/f'rs_buffer.pkl', 'wb') as handle:
+            with open(self._directory / f'rs_buffer.pkl', 'wb') as handle:
                 pickle.dump(list(self._complete_eps.keys()), handle, protocol=pickle.HIGHEST_PROTOCOL)
         self._enforce_limit()
 
-    def dataset(self, batch, length):
-        example = next(iter(self._generate_chunks(length)))
+    def dataset(self, batch, length, oversampling=False):
+        example = next(iter(self._generate_chunks(length, oversampling)))
         dataset = tf.data.Dataset.from_generator(
-            lambda: self._generate_chunks(length),
+            lambda: self._generate_chunks(length, oversampling),
             {k: v.dtype for k, v in example.items()},
             {k: v.shape for k, v in example.items()})
         dataset = dataset.batch(batch, drop_remainder=True)
         dataset = dataset.prefetch(5)
         return dataset
 
-    def _generate_chunks(self, length):
-        sequence = self._sample_sequence()
+    def _generate_chunks(self, length, oversampling):
+        sequence, index_to_add_later = self._sample_sequence(oversampling)
+
         while True:
             chunk = collections.defaultdict(list)
             added = 0
@@ -260,23 +284,28 @@ class Replay:
                     chunk[key].append(value)
                 added += len(adding['action'])
                 if len(sequence['action']) < 1:
-                    sequence = self._sample_sequence()
+                    sequence, index_to_add_later = self._sample_sequence(oversampling)
             chunk = {k: np.concatenate(v) for k, v in chunk.items()}
+            chunk["task_index"] = index_to_add_later
             yield chunk
 
-    def _sample_sequence(self):
+    def _sample_sequence(self, oversampling):
         episodes_keys = list(self._complete_eps.keys())
+        episodes = list(self._complete_eps.values())
         if self._ongoing:
-            episodes_keys += [
-                k for k, v in self._ongoing_eps.items()
-                if eplen(v) >= self._minlen]
+            episodes_keys += [k for k, v in self._ongoing_eps.items() if eplen(v) >= self._minlen]
+        if self._ongoing:
+            episodes += [
+                x for x in self._ongoing_eps.values()
+                if eplen(x) >= self._minlen]
         if self._reward_sampling:
             rewards = list(self._reward_eps.values())
             # if there is a mismatch in lengths lets sync the rewards with self._complete_eps()
             if len(rewards) != len(episodes_keys):
                 print("Syncing eps _reward_eps and _complete_eps")
                 _, _, self._reward_eps = load_episodes(self._directory,
-                self.capacity, self.minlen, self._coverage_sampling, self._coverage_sampling_args, check=False)
+                                                       self.capacity, self.minlen, self._coverage_sampling,
+                                                       self._coverage_sampling_args, check=False)
                 rewards = list(self._reward_eps.values())
             e_r = np.exp(rewards - np.max(rewards))
             rewards_norm = e_r / e_r.sum()
@@ -291,17 +320,33 @@ class Replay:
             e_unc = np.exp(uncertainties - np.max(uncertainties))
             uncertainty_norm = e_unc / e_unc.sum()
             episode_key = np.random.choice(
-                uncertainties,
+                list(self._episodes_uncertainties.keys()),
                 p=uncertainty_norm
             )
             self._logger.scalar("replay/uncertainty", self._episodes_uncertainties[episode_key])
+        elif oversampling:
+            episodes_0 = []
+            episodes_1 = []
+
+            for epi in episodes:
+                if epi["task_index"] == 0:
+                    episodes_0.append(epi)
+                elif epi["task_index"] == 1:
+                    episodes_1.append(epi)
+
+            if np.random.uniform(0, 1) < 0.99 and len(episodes_1) > 0:
+                i = np.random.randint(0, len(episodes_1))
+                episode = episodes_1[i]
+            elif len(episodes_0) > 0:
+                i = np.random.randint(0, len(episodes_0))
+                episode = episodes_0[i]
+            else:
+                i = np.random.randint(0, len(episodes_1))
+                episode = episodes_1[i]
+
         else:
             episode_key = self._random.choice(episodes_keys)
-
-        episode = self._complete_eps[episode_key]
-        info = parse_episode_name(episode_key)
-        self._logger.scalar("replay/total_episode", info['total_episodes'])
-        self._logger.scalar("replay/task", info['task'])
+            episode = self._complete_eps[episode_key]
 
         total = len(episode['action'])
         length = total
@@ -315,14 +360,17 @@ class Replay:
         if self._prioritize_ends:
             upper += self._minlen
         index = min(self._random.randint(upper), total - length)
+        index_to_add_later = episode["task_index"]
+
         sequence = {
             k: convert(v[index: index + length])
-            for k, v in episode.items() if not k.startswith('log_')}
+            for k, v in episode.items() if not k.startswith(('log_', "task_index"))}
         sequence['is_first'] = np.zeros(len(sequence['action']), np.bool)
         sequence['is_first'][0] = True
         if self._maxlen:
             assert self._minlen <= len(sequence['action']) <= self._maxlen
-        return sequence
+
+        return sequence, index_to_add_later
 
     def _check_if_uncertainties_available(self):
         keys_to_use = list(self._complete_eps.keys())
@@ -341,7 +389,7 @@ class Replay:
                     inputs = tf.stop_gradient(tf.concat([inputs, action], -1))
 
                 preds = [head(inputs).mode() for head in self.agent._expl_behavior._networks]
-                disag = tf.Tensor(preds).std(0).mean(-1)
+                disag = tf.convert_to_tensor(preds).std(0).mean(-1)
                 ep_uncertainty = np.mean(disag.cpu().numpy())
                 self._episodes_uncertainties[ep_key] = ep_uncertainty
 
@@ -367,13 +415,13 @@ class Replay:
             del self._reward_eps[str(candidate)]
             if str(candidate) in self._episodes_uncertainties:
                 del self._episodes_uncertainties[str(candidate)]
-        
+
         if self._coverage_sampling:
-            with open(self._directory/f'coverage_max_heap.pkl', 'wb') as handle:
+            with open(self._directory / f'coverage_max_heap.pkl', 'wb') as handle:
                 pickle.dump(self._episodes_heap, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         if self._reservoir_sampling:
-            with open(self._directory/f'rs_buffer.pkl', 'wb') as handle:
+            with open(self._directory / f'rs_buffer.pkl', 'wb') as handle:
                 pickle.dump(list(self._complete_eps.keys()), handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     @property
@@ -390,19 +438,19 @@ class Replay:
 
     @agent.setter
     def logger(self, logger):
-        self._logger = logger 
-    
+        self._logger = logger
+
+
 def count_episodes(directory):
     filenames = list(directory.glob("*.npz"))
     num_episodes = len(filenames)
 
     if num_episodes > 0:
         assert (
-            len(str(os.path.basename(filenames[0])).split("-")) == 5
+                len(str(os.path.basename(filenames[0])).split("-")) == 5
         ), "Probably filenames are not in following format: f'{timestamp}-{identifier}-{task}-{length}-{total_episodes}.npz'"
     num_steps = sum(int(str(os.path.basename(n)).split("-")[3]) - 1 for n in filenames)
     return num_episodes, num_steps
-
 
 
 def save_episode(directory, episode, task, total_episodes):
@@ -418,12 +466,13 @@ def save_episode(directory, episode, task, total_episodes):
     return filename
 
 
-def load_episodes(directory, capacity=None, minlen=1, coverage_sampling=False, coverage_sampling_args=None, check=False):
+def load_episodes(directory, capacity=None, minlen=1, coverage_sampling=False, coverage_sampling_args=None,
+                  check=False):
     # The returned directory from filenames to episodes is guaranteed to be in
     # temporally sorted order.
     filenames = sorted(directory.glob('*.npz'))
-    if coverage_sampling and os.path.exists(directory/f'coverage_max_heap.pkl'):
-        with open(directory/f'coverage_max_heap.pkl', 'rb') as handle:
+    if coverage_sampling and os.path.exists(directory / f'coverage_max_heap.pkl'):
+        with open(directory / f'coverage_max_heap.pkl', 'rb') as handle:
             _episodes_heap = pickle.load(handle)
         filenames = list(zip(*_episodes_heap))[1]
 
@@ -431,10 +480,10 @@ def load_episodes(directory, capacity=None, minlen=1, coverage_sampling=False, c
         num_steps = 0
         num_episodes = 0
         # we are going to only fetch the most recent
-        # if we are doing reservoir sampling a random shuffle of the replay buffer 
+        # if we are doing reservoir sampling a random shuffle of the replay buffer
         # will preserve and uniform distribution over all tasks
-        if os.path.exists(directory/f'rs_buffer.pkl'):
-            with open(directory/f'rs_buffer.pkl', 'rb') as handle:
+        if os.path.exists(directory / f'rs_buffer.pkl'):
+            with open(directory / f'rs_buffer.pkl', 'rb') as handle:
                 filenames = pickle.load(handle)
             filenames = [pathlib.Path(filename) for filename in filenames]
         for filename in reversed(filenames):
@@ -487,8 +536,9 @@ def load_episodes(directory, capacity=None, minlen=1, coverage_sampling=False, c
                 j += 1
             i += 1
         sys.exit("Finished check")
-    
+
     return episodes, tasks, rewards_eps
+
 
 def parse_episode_name(episode_name):
     episode_name = os.path.basename(episode_name)
@@ -510,6 +560,7 @@ def parse_episode_name(episode_name):
         "length": int(length),
         "total_episodes": int(total_episodes) if total_episodes else np.nan,
     }
+
 
 def convert(value):
     value = np.array(value)
