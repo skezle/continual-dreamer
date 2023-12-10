@@ -250,7 +250,7 @@ class Replay:
 
 
     def _generate_chunks(self, length, oversampling):
-        sequence, index_to_add_later = self._sample_sequence(oversampling) #kafel
+        sequence = self._sample_sequence(oversampling)
 
         while True:
             chunk = collections.defaultdict(list)
@@ -263,9 +263,8 @@ class Replay:
                     chunk[key].append(value)
                 added += len(adding['action'])
                 if len(sequence['action']) < 1:
-                    sequence, index_to_add_later = self._sample_sequence(oversampling)
+                    sequence = self._sample_sequence(oversampling)
             chunk = {k: np.concatenate(v) for k, v in chunk.items()}
-            chunk["task_index"] = index_to_add_later
             yield chunk
 
     def _sample_sequence(self, oversampling):
@@ -338,7 +337,6 @@ class Replay:
         if self._prioritize_ends:
             upper += self._minlen
         index = min(self._random.randint(upper), total - length)
-        index_to_add_later = episode["task_index"]
 
         sequence = {
             k: convert(v[index: index + length])
@@ -348,7 +346,7 @@ class Replay:
         if self._maxlen:
             assert self._minlen <= len(sequence['action']) <= self._maxlen
 
-        return sequence, index_to_add_later
+        return sequence
 
     def _check_if_uncertainties_available(self):
         keys_to_use = list(self._complete_eps.keys())
