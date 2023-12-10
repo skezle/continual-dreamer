@@ -272,7 +272,6 @@ class Replay:
         episodes = list(self._complete_eps.values())
         if self._ongoing:
             episodes_keys += [k for k, v in self._ongoing_eps.items() if eplen(v) >= self._minlen]
-        if self._ongoing:
             episodes += [
                 x for x in self._ongoing_eps.values()
                 if eplen(x) >= self._minlen]
