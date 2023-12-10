@@ -58,18 +58,26 @@ class Agent(common.Module):
         return outputs, state
 
     @tf.function
-    def train(self, data, state=None):
+    def train(self, data_wm, data_pol, state_wm=None, state_pol=None):
         metrics = {}
-        state, outputs, mets = self.wm.train(data, state)
-        metrics.update(mets)
-        start = outputs['post']
+        state_wm, outputs_wm, mets_wm = self.wm.train(data_wm, state_wm)
+        metrics.update(mets_wm)
+        start_wm = outputs_wm['post']
         reward = lambda seq: self.wm.heads['reward'](seq['feat']).mode()
+
+        data_pol = self.wm.preprocess(data_pol)
+        embed = self.wm.encoder(data_pol)
+        post, prior = self.wm.rssm.observe(embed, data_pol['action'], data_pol['is_first'], state_pol)
+        state_pol = {k: v[:, -1] for k, v in post.items()}
+        start_pol = post
+
         metrics.update(self._task_behavior.train(
-            self.wm, start, data['is_terminal'], reward))
+            self.wm, start_pol, data_pol['is_terminal'], reward))
+
         if self.config.expl_behavior != 'greedy':
-            mets = self._expl_behavior.train(start, outputs, data)[-1]
+            mets = self._expl_behavior.train(start_wm, outputs_wm, data_wm)[-1]
             metrics.update({'expl_' + key: value for key, value in mets.items()})
-        return state, metrics
+        return state_wm, state_pol, metrics
 
     @tf.function
     def report(self, data):

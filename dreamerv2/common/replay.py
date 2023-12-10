@@ -126,11 +126,12 @@ class Replay:
         # for i in range(max_task + 1):
         #     ret['er_task_{0}'.format(i)] = len([v for k, v in self._tasks.items() if v == i])
         return ret
-    
-    def add_step(self, transition, worker=0):
+
+    def add_step(self, transition, worker=0, task_index=0):
         episode = self._ongoing_eps[worker]
         for key, value in transition.items():
             episode[key].append(value)
+        episode["task_index"] = task_index
         if transition['is_last']:
             self.add_episode(episode)
             episode.clear()
@@ -237,18 +238,20 @@ class Replay:
                 pickle.dump(list(self._complete_eps.keys()), handle, protocol=pickle.HIGHEST_PROTOCOL)
         self._enforce_limit()
 
-    def dataset(self, batch, length):
-        example = next(iter(self._generate_chunks(length)))
+    def dataset(self, batch, length, oversampling=False):
+        example = next(iter(self._generate_chunks(length, oversampling)))
         dataset = tf.data.Dataset.from_generator(
-            lambda: self._generate_chunks(length),
+            lambda: self._generate_chunks(length, oversampling),
             {k: v.dtype for k, v in example.items()},
             {k: v.shape for k, v in example.items()})
         dataset = dataset.batch(batch, drop_remainder=True)
         dataset = dataset.prefetch(5)
         return dataset
 
-    def _generate_chunks(self, length):
-        sequence = self._sample_sequence()
+
+    def _generate_chunks(self, length, oversampling):
+        sequence, index_to_add_later = self._sample_sequence(oversampling) #kafel
+
         while True:
             chunk = collections.defaultdict(list)
             added = 0
@@ -260,23 +263,28 @@ class Replay:
                     chunk[key].append(value)
                 added += len(adding['action'])
                 if len(sequence['action']) < 1:
-                    sequence = self._sample_sequence()
+                    sequence, index_to_add_later = self._sample_sequence(oversampling)
             chunk = {k: np.concatenate(v) for k, v in chunk.items()}
+            chunk["task_index"] = index_to_add_later
             yield chunk
 
-    def _sample_sequence(self):
+    def _sample_sequence(self, oversampling):
         episodes_keys = list(self._complete_eps.keys())
+        episodes = list(self._complete_eps.values())
         if self._ongoing:
-            episodes_keys += [
-                k for k, v in self._ongoing_eps.items()
-                if eplen(v) >= self._minlen]
+            episodes_keys += [k for k, v in self._ongoing_eps.items() if eplen(v) >= self._minlen]
+        if self._ongoing:
+            episodes += [
+                x for x in self._ongoing_eps.values()
+                if eplen(x) >= self._minlen]
         if self._reward_sampling:
             rewards = list(self._reward_eps.values())
             # if there is a mismatch in lengths lets sync the rewards with self._complete_eps()
             if len(rewards) != len(episodes_keys):
                 print("Syncing eps _reward_eps and _complete_eps")
                 _, _, self._reward_eps = load_episodes(self._directory,
-                self.capacity, self.minlen, self._coverage_sampling, self._coverage_sampling_args, check=False)
+                                                       self.capacity, self.minlen, self._coverage_sampling,
+                                                       self._coverage_sampling_args, check=False)
                 rewards = list(self._reward_eps.values())
             e_r = np.exp(rewards - np.max(rewards))
             rewards_norm = e_r / e_r.sum()
@@ -291,18 +299,33 @@ class Replay:
             e_unc = np.exp(uncertainties - np.max(uncertainties))
             uncertainty_norm = e_unc / e_unc.sum()
             episode_key = np.random.choice(
-                uncertainties,
+                list(self._episodes_uncertainties.keys()),
                 p=uncertainty_norm
             )
             self._logger.scalar("replay/uncertainty", self._episodes_uncertainties[episode_key])
+        elif oversampling:
+            episodes_0 = []
+            episodes_1 = []
+
+            for epi in episodes:
+                if epi["task_index"] == 0:
+                    episodes_0.append(epi)
+                elif epi["task_index"] == 1:
+                    episodes_1.append(epi)
+
+            if np.random.uniform(0, 1) < 0.99 and len(episodes_1) > 0:
+                i = np.random.randint(0, len(episodes_1))
+                episode = episodes_1[i]
+            elif len(episodes_0) > 0:
+                i = np.random.randint(0, len(episodes_0))
+                episode = episodes_0[i]
+            else:
+                i = np.random.randint(0, len(episodes_1))
+                episode = episodes_1[i]
+
         else:
             episode_key = self._random.choice(episodes_keys)
-
-        episode = self._complete_eps[episode_key]
-        info = parse_episode_name(episode_key)
-        self._logger.scalar("replay/total_episode", info['total_episodes'])
-        self._logger.scalar("replay/task", info['task'])
-
+            episode = self._complete_eps[episode_key]
         total = len(episode['action'])
         length = total
         if self._maxlen:
@@ -315,14 +338,17 @@ class Replay:
         if self._prioritize_ends:
             upper += self._minlen
         index = min(self._random.randint(upper), total - length)
+        index_to_add_later = episode["task_index"]
+
         sequence = {
             k: convert(v[index: index + length])
-            for k, v in episode.items() if not k.startswith('log_')}
+            for k, v in episode.items() if not k.startswith(('log_', "task_index"))}
         sequence['is_first'] = np.zeros(len(sequence['action']), np.bool)
         sequence['is_first'][0] = True
         if self._maxlen:
             assert self._minlen <= len(sequence['action']) <= self._maxlen
-        return sequence
+
+        return sequence, index_to_add_later
 
     def _check_if_uncertainties_available(self):
         keys_to_use = list(self._complete_eps.keys())

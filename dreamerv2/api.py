@@ -71,6 +71,7 @@ def train(env, config, outputs=None):
         print(f'Episode has {length} steps and return {score:.1f}.')
         logger.scalar('return', score)
         logger.scalar('length', length)
+        logger.scalar('task', env.index)
         for key, value in ep.items():
             if re.match(config.log_keys_sum, key):
                 logger.scalar(f'sum_{key}', ep[key].sum())
@@ -111,23 +112,34 @@ def train(env, config, outputs=None):
     if isinstance(agnt._expl_behavior, Plan2Explore):
         replay.agent = agnt
 
-    dataset = iter(replay.dataset(**config.dataset))
+    dataset = iter(replay.dataset(**config.dataset, oversampling=False))
+    dataset_over = iter(replay.dataset(**config.dataset, oversampling=True))
+
     train_agent = common.CarryOverState(agnt.train)
-    train_agent(next(dataset))
+
+    data_wm = next(dataset)
+    data_pol = next(dataset_over)
+
+    train_agent(data_wm, data_pol)
+
     if (logdir / 'variables.pkl').exists():
         print("Loading agent.")
         agnt.load(logdir / 'variables.pkl')
     else:
         print('Pretrain agent.')
         for _ in range(config.pretrain):
-            train_agent(next(dataset))
+            data_wm = next(dataset)
+            data_pol = next(dataset_over)
+            train_agent(data_wm, data_pol)
     policy = lambda *args: agnt.policy(
         *args, mode='explore' if should_expl(step) else 'train')
 
     def train_step(tran, worker):
         if should_train(step):
             for _ in range(config.train_steps):
-                mets = train_agent(next(dataset))
+                data_wm = next(dataset)
+                data_pol = next(dataset_over)
+                mets = train_agent(data_wm, data_pol)
                 [metrics[key].append(value) for key, value in mets.items()]
         if should_log(step):
             for name, values in metrics.items():
@@ -138,14 +150,17 @@ def train(env, config, outputs=None):
             logger.write(fps=True)
 
     def eval_per_episode(ep):
+        task_idx = env.index
         length = len(ep['reward']) - 1
         score = float(ep['reward'].astype(np.float64).sum())
         # print(f'Episode has {length} steps and return {score:.1f}.')
         logger.scalar('eval_return', score)
         logger.scalar('eval_length', length)
+        logger.scalar('eval_return_{}'.format(task_idx), score)
+        logger.scalar('eval_length_{}'.format(task_idx), length)
         if should_video(step):
             for key in config.log_keys_video:
-                logger.video(f'eval_{step.value}', ep[key])
+                logger.video(f'eval_{task_idx}_{step.value}', ep[key])
         logger.write()
 
     driver.on_step(train_step)
